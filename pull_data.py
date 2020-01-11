@@ -21,28 +21,41 @@ def pull_shots():
 
         # Ignore data on teams and players, just interested in events during game
         all_plays = data["liveData"]["plays"]["allPlays"]
-        sog = []
         for play in all_plays:
             # SHOT event is a shot that was saved
             if play["result"]["eventTypeId"] == "SHOT":
-                sog.append(play)
+                if "coordinates" in play:
+                    if "x" in play["coordinates"] and "y" in play["coordinates"]:
+                        x.append(play["coordinates"]["x"])
+                        y.append(play["coordinates"]["y"])
+                        result.append("SAVE")
             # GOAL event is a shot that resulted in a goal
             elif play["result"]["eventTypeId"] == "GOAL":
                 if "emptyNet" in play["result"]:
                     # Do not want to include empty netters, since they cannot be saved by goalie
                     if play["result"]["emptyNet"] is False:
-                        sog.append(play)
+                        if "coordinates" in play:
+                            if "x" in play["coordinates"] and "y" in play["coordinates"]:
+                                x.append(play["coordinates"]["x"])
+                                y.append(play["coordinates"]["y"])
+                                result.append("GOAL")
+            elif play["result"]["eventTypeId"] == "MISSED_SHOT":
+                if "coordinates" in play:
+                    if "x" in play["coordinates"] and "y" in play["coordinates"]:
+                        x.append(play["coordinates"]["x"])
+                        y.append(play["coordinates"]["y"])
+                        result.append("MISS")
+            elif play["result"]["eventTypeId"] == "BLOCKED_SHOT":
+                if "coordinates" in play:
+                    if "x" in play["coordinates"] and "y" in play["coordinates"]:
+                        x.append(play["coordinates"]["x"])
+                        y.append(play["coordinates"]["y"])
+                        result.append("BLOCK")
 
         # print(json.dumps(sog, indent=4, separators=(',', ':')))
         # Interested in using the x and y coordinates to determine shot quality
         # Want consistent continuous variables
         # TODO: Explore using secondary type? (tip-in, snap shot, etc.)
-        for shot in sog:
-            if "coordinates" in shot:
-                if "x" in shot["coordinates"] and "y" in shot["coordinates"]:
-                    x.append(shot["coordinates"]["x"])
-                    y.append(shot["coordinates"]["y"])
-                    result.append(1 if shot["result"]["eventTypeId"] == 'GOAL' else 0)
         # print(str(i).zfill(4))
         # print(len(result))
         # Return a data frame
@@ -210,13 +223,17 @@ if __name__ == '__main__':
 
     # print(len(shot_df.index))
     # In total 79822 points of data
-    xGoal_model = runNN(shot_df)
-    compareGame(xGoal_model)
+    # xGoal_model = runNN(shot_df)
+    # compareGame(xGoal_model)
 
     # NOTE: So far, the model is too inconsistent, changes each time it is run, and xGoals
     # are not always close to each other for the same 2019 game, can range from 1.5 - 13.5
     # Might need to implement some regression to mean? Based on average save percentage?
     # NOTE: Also could just try a Bayes' classifier
+
+    # Look into pulling data into redshift
+    # Logistic Regression on the distance from goal
+    # Will need to calculate distance
 
 
 

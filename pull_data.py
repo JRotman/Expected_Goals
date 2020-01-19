@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
+from sklearn.linear_model import LogisticRegression
 
 
 def pull_shots():
@@ -63,6 +64,21 @@ def pull_shots():
         if games_parsed % 25 == 0:
             print('{0:.1f}% completed'.format(100*(games_parsed / 1271)))
     return pd.DataFrame(list(zip(x, y, result)), columns=['x', 'y', 'result'])
+
+
+def logit_fenwick(shot_df):
+    # In Hockey Fenwick is all shots besides those that are blocked
+    fenwick_df = shot_df[shot_df.result != "BLOCK"]
+    fenwick_df['goal'] = np.where(fenwick_df.loc[:, 'result'] == "GOAL", 1, 0)
+    # Constants based on goal being at (89,0)
+    # Absolute value on X to fold one side of the rink on the other
+    fenwick_df['distance'] = np.sqrt(np.power(np.abs(fenwick_df.loc[:, 'x']) - 89, 2) +
+                                     np.power(fenwick_df.loc[:, 'y'], 2))
+    print(fenwick_df.loc[:5, ['distance', 'goal']])
+    fenwick_model = LogisticRegression(penalty='l2', solver='liblinear').fit(
+        np.asarray(fenwick_df['distance']).reshape(-1, 1), np.asarray(fenwick_df['goal']))
+    return fenwick_model
+
 
 
 def runNN(data):
@@ -151,26 +167,24 @@ def compareGame(model):
     home = data["gameData"]["teams"]["home"]["id"]
     all_plays = data["liveData"]["plays"]["allPlays"]
     away_shots = []
-    away_x = []
-    away_y = []
+    away_dist = []
     home_shots = []
-    home_x = []
-    home_y = []
+    home_dist = []
 
     # Same as pull_data, but we will want to split between teams
     # NOTE: Could do this in the future to compare models between different teams
     for play in all_plays:
         # SHOT event is a shot that was saved
-        if play["result"]["eventTypeId"] == "SHOT":
+        if play["result"]["eventTypeId"] == "SHOT" or play["result"]["eventTypeId"] == "MISSED SHOT":
             if "coordinates" in play:
                 if "x" in play["coordinates"] and "y" in play["coordinates"]:
                     if play["team"]["id"] == away:
-                        away_x.append(play["coordinates"]["x"])
-                        away_y.append(play["coordinates"]["y"])
+                        away_dist.append(np.sqrt(np.power(np.abs(play["coordinates"]["x"]) - 89, 2) +
+                                                 np.power(play["coordinates"]["y"], 2)))
                         away_shots.append(0)
                     else:
-                        home_x.append(play["coordinates"]["x"])
-                        home_y.append(play["coordinates"]["y"])
+                        home_dist.append(np.sqrt(np.power(np.abs(play["coordinates"]["x"]) - 89, 2) +
+                                                 np.power(play["coordinates"]["y"], 2)))
                         home_shots.append(0)
 
         # GOAL event is a shot that resulted in a goal
@@ -181,25 +195,25 @@ def compareGame(model):
                     if "coordinates" in play:
                         if "x" in play["coordinates"] and "y" in play["coordinates"]:
                             if play["team"]["id"] == away:
-                                away_x.append(play["coordinates"]["x"])
-                                away_y.append(play["coordinates"]["y"])
+                                away_dist.append(np.sqrt(np.power(np.abs(play["coordinates"]["x"]) - 89, 2) +
+                                                         np.power(play["coordinates"]["y"], 2)))
                                 away_shots.append(1)
                             else:
-                                home_x.append(play["coordinates"]["x"])
-                                home_y.append(play["coordinates"]["y"])
+                                home_dist.append(np.sqrt(np.power(np.abs(play["coordinates"]["x"]) - 89, 2) +
+                                                         np.power(play["coordinates"]["y"], 2)))
                                 home_shots.append(1)
 
     # Predict expected goals using our model
-    home_coord = np.column_stack((home_x, home_y))
+    home_coord = np.asarray(home_dist).reshape(-1, 1)
     home_compare = np.asarray(home_shots)
-    home_check = model.predict(home_coord)
-    away_coord = np.column_stack((away_x, away_y))
+    home_check = model.predict_proba(home_coord)
+    away_coord = np.asarray(away_dist).reshape(-1, 1)
     away_compare = np.asarray(away_shots)
-    away_check = model.predict(away_coord)
+    away_check = model.predict_proba(away_coord)
 
     # Total xGoals is the sum of all of the expectations for each shot
-    print("Away team xGoals: ", np.sum(away_check[:, 0]))
-    print("Home team xGoals: ", np.sum(home_check[:, 0]))
+    print("Away team xGoals: ", np.sum(away_check[:, 1]))
+    print("Home team xGoals: ", np.sum(home_check[:, 1]))
     print("Away team Goals: ", np.sum(away_compare))
     print("Home team Goals: ", np.sum(home_compare))
 
@@ -220,6 +234,9 @@ if __name__ == '__main__':
         print("Data not found, now pulling from NHL API")
         shot_df = pull_shots()
         shot_df.to_csv("shot_data.csv", index=False)
+
+    fenwick_xg_model = logit_fenwick(shot_df)
+    compareGame(fenwick_xg_model)
 
     # print(len(shot_df.index))
     # In total 79822 points of data

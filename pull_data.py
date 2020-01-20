@@ -8,15 +8,21 @@ import tensorflow as tf
 from sklearn.linear_model import LogisticRegression
 
 
-def pull_shots():
+def pull_shots(year):
     x = []
     y = []
     result = []
+    games = 0
     games_parsed = 0
+    if year < 2017:
+        games = 1231
+    else:
+        games = 1272
     # Iterate over all 1271 games from the NHL season
-    for i in range(1, 1272):
+    for i in range(1, games):
         # Must use 4 digit code for each game, starting from 0001
-        url = "https://statsapi.web.nhl.com/api/v1/game/201802{}/feed/live".format(str(i).zfill(4))
+        url = "https://statsapi.web.nhl.com/api/v1/game/{}02{}/feed/live".format(str(year).zfill(4),
+                                                                                 str(i).zfill(4))
         r = requests.get(url)
         data = r.json()
 
@@ -66,19 +72,44 @@ def pull_shots():
     return pd.DataFrame(list(zip(x, y, result)), columns=['x', 'y', 'result'])
 
 
-def logit_fenwick(shot_df):
-    # In Hockey Fenwick is all shots besides those that are blocked
-    fenwick_df = shot_df[shot_df.result != "BLOCK"]
-    fenwick_df['goal'] = np.where(fenwick_df.loc[:, 'result'] == "GOAL", 1, 0)
+def logit_corsi(corsi_df):
+    # In Hockey Corsi is all shots taken
+    corsi_df.loc[:, 'goal'] = np.where(corsi_df.loc[:, 'result'] == "GOAL", 1, 0)
     # Constants based on goal being at (89,0)
     # Absolute value on X to fold one side of the rink on the other
-    fenwick_df['distance'] = np.sqrt(np.power(np.abs(fenwick_df.loc[:, 'x']) - 89, 2) +
-                                     np.power(fenwick_df.loc[:, 'y'], 2))
-    print(fenwick_df.loc[:5, ['distance', 'goal']])
+    corsi_df.loc[:, 'distance'] = np.sqrt(np.power(np.abs(corsi_df.loc[:, 'x']) - 89, 2) +
+                                          np.power(corsi_df.loc[:, 'y'], 2))
+    # Model based on linear relationship between distance from goal and likelihood of goal
+    corsi_model = LogisticRegression(penalty='l2', solver='liblinear').fit(
+        np.asarray(corsi_df['distance']).reshape(-1, 1), np.asarray(corsi_df['goal']))
+    return corsi_model
+
+
+def logit_fenwick(shot_df):
+    # In Hockey Fenwick is all shots besides those that are blocked
+    fenwick_df = pd.DataFrame(shot_df.loc[shot_df.loc[:, 'result'] != "BLOCK", :])
+    fenwick_df.loc[:, 'goal'] = np.where(fenwick_df.loc[:, 'result'] == "GOAL", 1, 0)
+    # Constants based on goal being at (89,0)
+    # Absolute value on X to fold one side of the rink on the other
+    fenwick_df.loc[:, 'distance'] = np.sqrt(np.power(np.abs(fenwick_df.loc[:, 'x']) - 89, 2) +
+                                            np.power(fenwick_df.loc[:, 'y'], 2))
     fenwick_model = LogisticRegression(penalty='l2', solver='liblinear').fit(
         np.asarray(fenwick_df['distance']).reshape(-1, 1), np.asarray(fenwick_df['goal']))
     return fenwick_model
 
+
+def logit_sog(shot_df):
+    # In Hockey SoG is all shots that were goals, or saved by the goalie
+    sog_df = pd.DataFrame(shot_df.loc[(shot_df.loc[:, 'result'] == "SAVE") |
+                                      (shot_df.loc[:, 'result'] == "GOAL"), :])
+    sog_df.loc[:, 'goal'] = np.where(sog_df.loc[:, 'result'] == "GOAL", 1, 0)
+    # Constants based on goal being at (89,0)
+    # Absolute value on X to fold one side of the rink on the other
+    sog_df.loc[:, 'distance'] = np.sqrt(np.power(np.abs(sog_df.loc[:, 'x']) - 89, 2) +
+                                        np.power(sog_df.loc[:, 'y'], 2))
+    sog_model = LogisticRegression(penalty='l2', solver='liblinear').fit(
+        np.asarray(sog_df['distance']).reshape(-1, 1), np.asarray(sog_df['goal']))
+    return sog_model
 
 
 def runNN(data):
@@ -175,7 +206,8 @@ def compareGame(model):
     # NOTE: Could do this in the future to compare models between different teams
     for play in all_plays:
         # SHOT event is a shot that was saved
-        if play["result"]["eventTypeId"] == "SHOT" or play["result"]["eventTypeId"] == "MISSED SHOT":
+        if play["result"]["eventTypeId"] == "SHOT" or play["result"]["eventTypeId"] == "MISSED SHOT"\
+                or play["result"]["eventTypeId"] == "BLOCKED SHOT":
             if "coordinates" in play:
                 if "x" in play["coordinates"] and "y" in play["coordinates"]:
                     if play["team"]["id"] == away:
@@ -224,19 +256,74 @@ def compareGame(model):
                  columns=["xGoal", "result"]).to_csv("away_prediction.csv")
 
 
+def test_model(model, test_data, model_name):
+    # Run personal evaluation on test data
+    test_data.loc[:, 'goal'] = np.where(test_data.loc[:, 'result'] == "GOAL", 1, 0)
+    test_data.loc[:, 'distance'] = np.sqrt(np.power(np.abs(test_data.loc[:, 'x']) - 89, 2) +
+                                            np.power(test_data.loc[:, 'y'], 2))
+    check = model.predict_proba(np.asarray(test_data.loc[:, 'distance']).reshape(-1, 1))
+    test_df = pd.DataFrame(list(zip(check[:, 1], test_data.loc[:, 'goal'])), columns=["prediction", "result"])
+    # save straight comparison between expected goals and goals
+    test_df.to_csv("{}_prediction.csv".format(model_name))
+    # print(test_df.groupby('result')['prediction'].mean())
+
+    # print(check)# test_coord[0, 0], test_coord[0, 1], test_labels[0], check[0])
+    # plot the predicted data as a 2dhistogram, weigh by xgoals, and normalize
+    heatmap, xedges, yedges = np.histogram2d(test_data.loc[:, 'x'], test_data.loc[:, 'y'], normed=True,
+                                             bins=50, weights=check[:, 1])
+    extent = [0, 100, -42.5, 42.5]
+    plt.clf()
+    plt.imshow(heatmap.T, extent=extent, origin='lower')
+    plt.title("{} Predicted Expected Goals".format(model_name))
+    plt.savefig("Prediction_{}.png".format(model_name))
+
+    # plot the real data as a 2dhistogram, weigh by actual result, and normalize
+    heatmap, xedges, yedges = np.histogram2d(test_data.loc[:, 'x'], test_data.loc[:, 'y'], normed=True,
+                                             bins=50, weights=test_data.loc[:, 'goal'])
+    extent = [0, 100, -42.5, 42.5]
+    plt.clf()
+    plt.imshow(heatmap.T, extent=extent, origin='lower')
+    plt.title("Actual Goals")
+    plt.savefig("Reality.png")
+
+    xG = np.sum(test_df.loc[:, 'prediction'])
+    G = np.sum(test_df.loc[:, 'result'])
+    print(model_name, " xG - G = ", xG - G)
+
+
 if __name__ == '__main__':
-    # Check if the data has been pulled already
-    if os.path.exists("shot_data.csv"):
-        print("Shot data located, using saved CSV")
-        shot_df = pd.read_csv('shot_data.csv')
+    # Check if the training data has been pulled already
+    if os.path.exists("train_data.csv"):
+        print("Training data located, using saved CSV")
+        train_df = pd.read_csv('train_data.csv')
     # If not pull it and save it to a CSV
     else:
-        print("Data not found, now pulling from NHL API")
-        shot_df = pull_shots()
-        shot_df.to_csv("shot_data.csv", index=False)
+        print("Training data not found, now pulling 3 seasons (2015-2017) from NHL API")
+        year1 = pull_shots(2015)
+        year2 = pull_shots(2016)
+        year3 = pull_shots(2017)
+        train_df = pd.concat([year1, year2, year3])
+        train_df.to_csv("train_data.csv", index=False)
 
-    fenwick_xg_model = logit_fenwick(shot_df)
+    if os.path.exists("test_data.csv"):
+        print("Testing data located, using saved CSV")
+        test_df = pd.read_csv('test_data.csv')
+    # If not pull it and save it to a CSV
+    else:
+        print("Testing data not found, now pulling one season (2018) from NHL API")
+        test_df = pull_shots(2018)
+        test_df.to_csv("test_data.csv", index=False)
+
+    corsi_xg_model = logit_corsi(train_df)
+    fenwick_xg_model = logit_fenwick(train_df)
+    sog_xg_model = logit_sog(train_df)
+    test_model(corsi_xg_model, test_df, "Corsi")
+    test_model(fenwick_xg_model, test_df, "Fenwick")
+    test_model(sog_xg_model, test_df, "SoG")
+
+    compareGame(corsi_xg_model)
     compareGame(fenwick_xg_model)
+    compareGame(sog_xg_model)
 
     # print(len(shot_df.index))
     # In total 79822 points of data
